@@ -7,11 +7,27 @@ from datetime import datetime, timezone
 dynamodb = boto3.resource("dynamodb")
 table = dynamodb.Table("url-shortener")
 
+CORS_HEADERS = {
+    "Access-Control-Allow-Origin": "https://short.hasankurt.com",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type",
+}
+
+
 def generate_short_code(length=6):
     chars = string.ascii_letters + string.digits
     return "".join(random.choices(chars, k=length))
 
+
 def shorten_url(event, context):
+    # Handle OPTIONS preflight
+    if event.get("requestContext", {}).get("http", {}).get("method") == "OPTIONS":
+        return {
+            "statusCode": 200,
+            "headers": CORS_HEADERS,
+            "body": ""
+        }
+
     try:
         body = json.loads(event.get("body", "{}"))
         original_url = body.get("url")
@@ -19,6 +35,7 @@ def shorten_url(event, context):
         if not original_url:
             return {
                 "statusCode": 400,
+                "headers": CORS_HEADERS,
                 "body": json.dumps({"error": "Missing 'url' in request body"})
             }
 
@@ -33,6 +50,7 @@ def shorten_url(event, context):
 
         return {
             "statusCode": 201,
+            "headers": CORS_HEADERS,
             "body": json.dumps({
                 "short_url": f"https://short.hasankurt.com/{short_code}",
                 "short_code": short_code
@@ -42,12 +60,19 @@ def shorten_url(event, context):
     except Exception as e:
         return {
             "statusCode": 500,
+            "headers": CORS_HEADERS,
             "body": json.dumps({"error": str(e)})
         }
 
+
 def redirect_url(event, context):
     try:
-        short_code = event.get("pathParameters", {}).get("short_code")
+        path_params = event.get("pathParameters") or {}
+        short_code = path_params.get("short_code")
+
+        if not short_code:
+            raw_path = event.get("rawPath", "")
+            short_code = raw_path.lstrip("/")
 
         if not short_code:
             return {

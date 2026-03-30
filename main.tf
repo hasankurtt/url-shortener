@@ -12,7 +12,6 @@ provider "aws" {
   region = var.region
 }
 
-# ACM for CloudFront must be in us-east-1
 provider "aws" {
   alias  = "us_east_1"
   region = "us-east-1"
@@ -22,8 +21,6 @@ provider "aws" {
 # IAM — Lambda execution role
 # ─────────────────────────────────────────────
 
-# Bu rol Lambda'nın AWS servislerine erişmesini sağlıyor.
-# Lambda'nın "kimliği" gibi düşünebilirsin.
 resource "aws_iam_role" "lambda_role" {
   name = "url-shortener-lambda-role"
 
@@ -39,13 +36,11 @@ resource "aws_iam_role" "lambda_role" {
   })
 }
 
-# Lambda'nın CloudWatch'a log yazabilmesi için AWS'nin hazır policy'si
 resource "aws_iam_role_policy_attachment" "lambda_basic" {
   role       = aws_iam_role.lambda_role.name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 }
 
-# Lambda'nın DynamoDB'ye okuma/yazma yapabilmesi için custom policy
 resource "aws_iam_role_policy" "lambda_dynamodb" {
   name = "url-shortener-dynamodb-policy"
   role = aws_iam_role.lambda_role.id
@@ -65,22 +60,20 @@ resource "aws_iam_role_policy" "lambda_dynamodb" {
 }
 
 # ─────────────────────────────────────────────
-# Lambda — kod paketini zip'le ve yükle
+# Lambda
 # ─────────────────────────────────────────────
 
-# Terraform, handler.py dosyasını otomatik zip'leyip Lambda'ya yükliyor
 data "archive_file" "lambda_zip" {
   type        = "zip"
   source_file = "${path.module}/lambda/handler.py"
   output_path = "${path.module}/lambda/handler.zip"
 }
 
-# URL kısaltma fonksiyonu
 resource "aws_lambda_function" "shorten" {
   filename         = data.archive_file.lambda_zip.output_path
   function_name    = "url-shortener-shorten"
   role             = aws_iam_role.lambda_role.arn
-  handler          = "handler.shorten_url"  # handler.py içindeki shorten_url fonksiyonu
+  handler          = "handler.shorten_url"
   runtime          = "python3.12"
   source_code_hash = data.archive_file.lambda_zip.output_base64sha256
 
@@ -91,12 +84,11 @@ resource "aws_lambda_function" "shorten" {
   }
 }
 
-# Redirect fonksiyonu
 resource "aws_lambda_function" "redirect" {
   filename         = data.archive_file.lambda_zip.output_path
   function_name    = "url-shortener-redirect"
   role             = aws_iam_role.lambda_role.arn
-  handler          = "handler.redirect_url"  # handler.py içindeki redirect_url fonksiyonu
+  handler          = "handler.redirect_url"
   runtime          = "python3.12"
   source_code_hash = data.archive_file.lambda_zip.output_base64sha256
 
@@ -108,7 +100,7 @@ resource "aws_lambda_function" "redirect" {
 }
 
 # ─────────────────────────────────────────────
-# API Gateway — HTTP API (v2, daha ucuz ve basit)
+# API Gateway
 # ─────────────────────────────────────────────
 
 resource "aws_apigatewayv2_api" "url_shortener" {
@@ -116,13 +108,13 @@ resource "aws_apigatewayv2_api" "url_shortener" {
   protocol_type = "HTTP"
 
   cors_configuration {
-    allow_origins = ["*"]
-    allow_methods = ["GET", "POST"]
+    allow_origins = ["https://${var.subdomain}"]
+    allow_methods = ["GET", "POST", "OPTIONS"]
     allow_headers = ["Content-Type"]
+    max_age       = 300
   }
 }
 
-# API Gateway'in Lambda'yı çağırabilmesi için izin
 resource "aws_lambda_permission" "shorten" {
   statement_id  = "AllowAPIGateway"
   action        = "lambda:InvokeFunction"
@@ -139,7 +131,6 @@ resource "aws_lambda_permission" "redirect" {
   source_arn    = "${aws_apigatewayv2_api.url_shortener.execution_arn}/*/*"
 }
 
-# Lambda integration — API Gateway ile Lambda'yı bağlıyor
 resource "aws_apigatewayv2_integration" "shorten" {
   api_id                 = aws_apigatewayv2_api.url_shortener.id
   integration_type       = "AWS_PROXY"
@@ -154,7 +145,6 @@ resource "aws_apigatewayv2_integration" "redirect" {
   payload_format_version = "2.0"
 }
 
-# Route'lar — hangi endpoint hangi Lambda'ya gidecek
 resource "aws_apigatewayv2_route" "shorten" {
   api_id    = aws_apigatewayv2_api.url_shortener.id
   route_key = "POST /shorten"
@@ -167,7 +157,6 @@ resource "aws_apigatewayv2_route" "redirect" {
   target    = "integrations/${aws_apigatewayv2_integration.redirect.id}"
 }
 
-# Stage — API'nin yayın ortamı ($default = direkt canlı)
 resource "aws_apigatewayv2_stage" "default" {
   api_id      = aws_apigatewayv2_api.url_shortener.id
   name        = "$default"
@@ -175,12 +164,12 @@ resource "aws_apigatewayv2_stage" "default" {
 }
 
 # ─────────────────────────────────────────────
-# ACM — short.hasankurt.com için SSL sertifikası
+# ACM — api.short.hasankurt.com (API)
 # ─────────────────────────────────────────────
 
-resource "aws_acm_certificate" "url_shortener" {
+resource "aws_acm_certificate" "api" {
   provider          = aws.us_east_1
-  domain_name       = var.subdomain
+  domain_name       = var.api_subdomain
   validation_method = "DNS"
 
   lifecycle {
@@ -188,19 +177,9 @@ resource "aws_acm_certificate" "url_shortener" {
   }
 }
 
-# ─────────────────────────────────────────────
-# Route 53 — short.hasankurt.com DNS kaydı
-# ─────────────────────────────────────────────
-
-# Mevcut hosted zone'u veri olarak çekiyoruz (yeniden oluşturmuyoruz)
-data "aws_route53_zone" "main" {
-  name = var.domain_name
-}
-
-# ACM DNS validation kaydı
-resource "aws_route53_record" "cert_validation" {
+resource "aws_route53_record" "api_cert_validation" {
   for_each = {
-    for dvo in aws_acm_certificate.url_shortener.domain_validation_options : dvo.domain_name => {
+    for dvo in aws_acm_certificate.api.domain_validation_options : dvo.domain_name => {
       name   = dvo.resource_record_name
       type   = dvo.resource_record_type
       record = dvo.resource_record_value
@@ -214,19 +193,63 @@ resource "aws_route53_record" "cert_validation" {
   records = [each.value.record]
 }
 
-resource "aws_acm_certificate_validation" "url_shortener" {
+resource "aws_acm_certificate_validation" "api" {
   provider                = aws.us_east_1
-  certificate_arn         = aws_acm_certificate.url_shortener.arn
-  validation_record_fqdns = [for r in aws_route53_record.cert_validation : r.fqdn]
+  certificate_arn         = aws_acm_certificate.api.arn
+  validation_record_fqdns = [for r in aws_route53_record.api_cert_validation : r.fqdn]
 }
 
 # ─────────────────────────────────────────────
-# CloudFront — API Gateway önüne CDN + custom domain
+# ACM — short.hasankurt.com (Frontend)
 # ─────────────────────────────────────────────
 
-resource "aws_cloudfront_distribution" "url_shortener" {
+resource "aws_acm_certificate" "frontend" {
+  provider          = aws.us_east_1
+  domain_name       = var.subdomain
+  validation_method = "DNS"
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+resource "aws_route53_record" "frontend_cert_validation" {
+  for_each = {
+    for dvo in aws_acm_certificate.frontend.domain_validation_options : dvo.domain_name => {
+      name   = dvo.resource_record_name
+      type   = dvo.resource_record_type
+      record = dvo.resource_record_value
+    }
+  }
+
+  zone_id = data.aws_route53_zone.main.zone_id
+  name    = each.value.name
+  type    = each.value.type
+  ttl     = 60
+  records = [each.value.record]
+}
+
+resource "aws_acm_certificate_validation" "frontend" {
+  provider                = aws.us_east_1
+  certificate_arn         = aws_acm_certificate.frontend.arn
+  validation_record_fqdns = [for r in aws_route53_record.frontend_cert_validation : r.fqdn]
+}
+
+# ─────────────────────────────────────────────
+# Route 53
+# ─────────────────────────────────────────────
+
+data "aws_route53_zone" "main" {
+  name = var.domain_name
+}
+
+# ─────────────────────────────────────────────
+# CloudFront — API (api.short.hasankurt.com)
+# ─────────────────────────────────────────────
+
+resource "aws_cloudfront_distribution" "api" {
   enabled = true
-  aliases = [var.subdomain]
+  aliases = [var.api_subdomain]
 
   origin {
     domain_name = replace(aws_apigatewayv2_api.url_shortener.api_endpoint, "https://", "")
@@ -238,14 +261,20 @@ resource "aws_cloudfront_distribution" "url_shortener" {
       origin_protocol_policy = "https-only"
       origin_ssl_protocols   = ["TLSv1.2"]
     }
+
+    custom_header {
+      name  = "X-Forwarded-Host"
+      value = var.api_subdomain
+    }
   }
 
   default_cache_behavior {
-    allowed_methods        = ["GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE"]
-    cached_methods         = ["GET", "HEAD"]
-    target_origin_id       = "APIGateway"
-    viewer_protocol_policy = "redirect-to-https"
-    cache_policy_id        = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" # CachingDisabled
+    allowed_methods          = ["GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE"]
+    cached_methods           = ["GET", "HEAD", "OPTIONS"]
+    target_origin_id         = "APIGateway"
+    viewer_protocol_policy   = "redirect-to-https"
+    cache_policy_id          = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"
+    origin_request_policy_id = "b689b0a8-53d0-40ab-baf2-68738e2966ac"
   }
 
   restrictions {
@@ -255,23 +284,148 @@ resource "aws_cloudfront_distribution" "url_shortener" {
   }
 
   viewer_certificate {
-    acm_certificate_arn      = aws_acm_certificate_validation.url_shortener.certificate_arn
+    acm_certificate_arn      = aws_acm_certificate_validation.api.certificate_arn
     ssl_support_method       = "sni-only"
     minimum_protocol_version = "TLSv1.2_2021"
   }
 
-  depends_on = [aws_acm_certificate_validation.url_shortener]
+  depends_on = [aws_acm_certificate_validation.api]
 }
 
-# short.hasankurt.com → CloudFront
-resource "aws_route53_record" "url_shortener" {
+resource "aws_route53_record" "api" {
+  zone_id = data.aws_route53_zone.main.zone_id
+  name    = var.api_subdomain
+  type    = "A"
+
+  alias {
+    name                   = aws_cloudfront_distribution.api.domain_name
+    zone_id                = aws_cloudfront_distribution.api.hosted_zone_id
+    evaluate_target_health = false
+  }
+}
+
+# ─────────────────────────────────────────────
+# S3 — Frontend bucket
+# ─────────────────────────────────────────────
+
+resource "aws_s3_bucket" "frontend" {
+  bucket = "short.hasankurt.com"
+}
+
+resource "aws_s3_bucket_public_access_block" "frontend" {
+  bucket = aws_s3_bucket.frontend.id
+
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_policy" "frontend" {
+  bucket = aws_s3_bucket.frontend.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Sid    = "AllowCloudFrontOAC"
+      Effect = "Allow"
+      Principal = {
+        Service = "cloudfront.amazonaws.com"
+      }
+      Action   = "s3:GetObject"
+      Resource = "${aws_s3_bucket.frontend.arn}/*"
+      Condition = {
+        StringEquals = {
+          "AWS:SourceArn" = aws_cloudfront_distribution.frontend.arn
+        }
+      }
+    }]
+  })
+}
+
+# ─────────────────────────────────────────────
+# CloudFront OAC — Frontend
+# ─────────────────────────────────────────────
+
+resource "aws_cloudfront_origin_access_control" "frontend" {
+  name                              = "short-hasankurt-frontend-oac"
+  origin_access_control_origin_type = "s3"
+  signing_behavior                  = "always"
+  signing_protocol                  = "sigv4"
+}
+
+# ─────────────────────────────────────────────
+# CloudFront — Frontend (short.hasankurt.com)
+# Sadece S3 — redirect Next.js dynamic route ile yapılıyor
+# ─────────────────────────────────────────────
+
+resource "aws_cloudfront_distribution" "frontend" {
+  enabled             = true
+  default_root_object = "index.html"
+  aliases             = [var.subdomain]
+
+  origin {
+    domain_name              = aws_s3_bucket.frontend.bucket_regional_domain_name
+    origin_id                = "S3-frontend"
+    origin_access_control_id = aws_cloudfront_origin_access_control.frontend.id
+  }
+
+  default_cache_behavior {
+    allowed_methods        = ["GET", "HEAD"]
+    cached_methods         = ["GET", "HEAD"]
+    target_origin_id       = "S3-frontend"
+    viewer_protocol_policy = "redirect-to-https"
+    compress               = true
+
+    forwarded_values {
+      query_string = false
+      cookies {
+        forward = "none"
+      }
+    }
+
+    min_ttl     = 0
+    default_ttl = 86400
+    max_ttl     = 31536000
+  }
+
+  custom_error_response {
+    error_code            = 403
+    response_code         = 200
+    response_page_path    = "/index.html"
+    error_caching_min_ttl = 10
+  }
+
+  custom_error_response {
+    error_code            = 404
+    response_code         = 200
+    response_page_path    = "/index.html"
+    error_caching_min_ttl = 10
+  }
+
+  restrictions {
+    geo_restriction {
+      restriction_type = "none"
+    }
+  }
+
+  viewer_certificate {
+    acm_certificate_arn      = aws_acm_certificate_validation.frontend.certificate_arn
+    ssl_support_method       = "sni-only"
+    minimum_protocol_version = "TLSv1.2_2021"
+  }
+
+  depends_on = [aws_acm_certificate_validation.frontend]
+}
+
+resource "aws_route53_record" "frontend" {
   zone_id = data.aws_route53_zone.main.zone_id
   name    = var.subdomain
   type    = "A"
 
   alias {
-    name                   = aws_cloudfront_distribution.url_shortener.domain_name
-    zone_id                = aws_cloudfront_distribution.url_shortener.hosted_zone_id
+    name                   = aws_cloudfront_distribution.frontend.domain_name
+    zone_id                = aws_cloudfront_distribution.frontend.hosted_zone_id
     evaluate_target_health = false
   }
 }

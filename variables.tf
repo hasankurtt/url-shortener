@@ -9,8 +9,13 @@ variable "domain_name" {
 }
 
 variable "subdomain" {
-  description = "Subdomain for URL shortener"
+  description = "Frontend subdomain"
   default     = "short.hasankurt.com"
+}
+
+variable "api_subdomain" {
+  description = "API subdomain"
+  default     = "api.short.hasankurt.com"
 }
 
 variable "dynamodb_table_name" {
